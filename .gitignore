@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+
+# Virtual environment
+.venv/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Coverage
+htmlcov/
+coverage.xml
+.coverage
+
+# Secrets
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
