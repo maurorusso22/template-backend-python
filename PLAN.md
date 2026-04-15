@@ -90,6 +90,28 @@ Must go beyond a hello-world. It must demonstrate:
 - `test_items.py`: POST with valid payload, POST with invalid payload (422), GET existing item, GET non-existing item (404)
 - Use `fastapi.testclient.TestClient` (backed by `httpx`)
 
+#### Verification
+```bash
+# 1. Format check
+uv run ruff format --check .
+
+# 2. Lint check
+uv run ruff check .
+
+# 3. Type check
+uv run mypy src/
+
+# 4. Tests with coverage (must be ≥80%)
+uv run pytest --cov=src --cov-report=term --cov-fail-under=80
+
+# 5. Smoke-test the app manually (optional)
+uv run uvicorn src.main:app --reload
+# Then in another terminal:
+# curl localhost:8000/health
+# curl -X POST localhost:8000/items -H 'Content-Type: application/json' -d '{"name":"test","price":9.99}'
+# curl localhost:8000/items/1
+```
+
 ---
 
 ### Step 2: Dockerfile
