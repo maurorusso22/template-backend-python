@@ -211,10 +211,35 @@ docker rmi template-backend-python
    - Enforce `--strict` with types: `feat, fix, docs, chore, refactor, test, ci, build`
    - Enforces messages like `feat: add items endpoint` and rejects `add items endpoint`
 
+**Dev dependency:** `pre-commit` is added to `pyproject.toml` under `[project.optional-dependencies] dev` so it's available via `uv sync --all-extras` without requiring a system-level install. Any contributor who installs dev dependencies gets pre-commit automatically — no separate `pip install pre-commit` or `brew install pre-commit` needed.
+
 **Post-clone setup required:**
 ```bash
-pre-commit install
-pre-commit install --hook-type commit-msg
+uv run pre-commit install
+uv run pre-commit install --hook-type commit-msg
+```
+
+#### Verification
+```bash
+# 1. Install dev dependencies (includes pre-commit)
+uv sync --all-extras
+
+# 2. Install git hooks
+uv run pre-commit install
+uv run pre-commit install --hook-type commit-msg
+
+# 3. Run all hooks against existing files
+uv run pre-commit run --all-files
+# All hooks should pass. On first run, pre-commit downloads and installs
+# each hook's environment — this is normal and only happens once.
+
+# 4. Verify conventional commits hook (commit-msg stage)
+# Try a bad commit message — should be rejected:
+git commit --allow-empty -m "bad message"
+# Try a valid commit message — should pass:
+git commit --allow-empty -m "chore: test conventional commits hook"
+# Then undo the test commit:
+git reset HEAD~1
 ```
 
 ---
