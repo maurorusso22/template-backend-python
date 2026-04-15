@@ -116,15 +116,66 @@ uv run uvicorn src.main:app --reload
 
 ### Step 2: Dockerfile
 
-**What:** Create a production-ready, hardened Dockerfile.
+**What:** Create a production-ready, hardened Dockerfile with multi-stage build.
+
+**Files:**
+- `Dockerfile`
+- `.dockerignore`
+
+**Multi-stage build (2 stages):**
+
+**Stage 1 — `builder`:** Installs `uv` (pinned with digest SHA) and production dependencies. The `uv`/`uvx` binaries and any build tooling stay in this stage only.
+
+**Stage 2 — `runtime`:** Copies only the installed venv and source from `builder`. No `uv`, no build tools — smaller image, smaller attack surface.
 
 **Requirements:**
-1. **Digest SHA base image pinning** — e.g., `python:3.12.9-slim@sha256:<digest>`. This is the highest level of pinning: the image is immutable and byte-identical across every build, regardless of when or where it runs. The human-readable tag (`3.12.9-slim`) stays in the FROM line for readability, but the `@sha256:` suffix is what Docker actually resolves. Dependabot (Step 6) with `package-ecosystem: docker` automatically opens PRs when a new digest is available, so updates are zero-effort. To obtain the digest: `docker pull python:3.12.9-slim` prints it, or check Docker Hub's tag page.
-2. **Digest SHA uv image pinning** — Same approach for `ghcr.io/astral-sh/uv`: pin to a specific version tag + digest SHA (not `:latest`). Obtain the digest from GHCR or via `docker pull`.
-3. **Non-root user** — Create a dedicated user (UID 1000) and switch to it before CMD. Required for K8s `runAsNonRoot: true`. Follows the Principle of Least Privilege: if the container is compromised, the attacker has minimal permissions.
-4. **Layer optimization** — Copy `pyproject.toml` + `uv.lock` and install deps before copying source code, so dependency install is cached across builds.
-5. **No dev dependencies in production** — Use `uv sync --no-dev --no-install-project`
-6. **Expose port 8000** — Run uvicorn on `0.0.0.0:8000`
+1. **Digest SHA base image pinning** — e.g., `python:3.12.13-slim@sha256:<digest>` (multi-arch manifest list digest, not platform-specific). The human-readable tag stays for readability, the `@sha256:` suffix is what Docker resolves. Dependabot (Step 6) with `package-ecosystem: docker` opens PRs when a new digest is available.
+2. **Digest SHA uv image pinning** — Same approach for `ghcr.io/astral-sh/uv`: pin to a specific version tag + digest SHA (not `:latest`).
+3. **Runtime environment variables:**
+   - `PYTHONDONTWRITEBYTECODE=1` — No `.pyc` files (not useful in containers)
+   - `PYTHONUNBUFFERED=1` — Unbuffered stdout/stderr for proper logging
+   - `VIRTUAL_ENV=/app/.venv` + `PATH` — Explicit venv path, avoids relying on implicit `.venv` location
+4. **Non-root user** — Create a dedicated user (UID 1000) and switch to it before CMD. Required for K8s `runAsNonRoot: true`. Follows the Principle of Least Privilege.
+5. **File ownership** — `COPY --from=builder --chown=appuser:appuser /app /app` so files are owned by the non-root user, not root.
+6. **Layer optimization** — Copy `pyproject.toml` + `uv.lock` and install deps before copying source code, so dependency install is cached across builds.
+7. **No dev dependencies in production** — Use `uv sync --no-dev --no-install-project --frozen`
+8. **HEALTHCHECK** — `urllib.request.urlopen` against `/health` with Python-level `timeout=2`. Docker-level `--timeout=5s` acts as a safety net. Lets Docker and orchestrators (Compose, ECS) monitor container health.
+9. **Expose port 8000** — Run uvicorn on `0.0.0.0:8000`
+
+**`.dockerignore` must exclude:** `.git`, `__pycache__/`, `*.pyc`, `.env`, `tests/`, `dist/`
+
+**Note on OS vulnerabilities:** `apt-get upgrade` patches CVEs but breaks reproducibility (same Dockerfile produces different images over time, defeating digest pinning). Preferred approach: let Dependabot/Renovate bump the base image digest via PR.
+
+#### Verification
+```bash
+# 1. Build the image
+docker build -t template-backend-python .
+
+# 2. Verify multi-stage: runtime image should NOT contain uv
+docker run --rm template-backend-python which uv  # should fail / "not found"
+
+# 3. Verify non-root user is active
+docker run --rm template-backend-python whoami  # should print "appuser"
+docker run --rm template-backend-python id      # should show uid=1000
+
+# 4. Run the container and test endpoints
+docker run -d --name test-app -p 8000:8000 template-backend-python
+# Wait for startup, then:
+curl -f http://localhost:8000/health       # should return {"status":"healthy"}
+curl -X POST localhost:8000/items -H 'Content-Type: application/json' -d '{"name":"test","price":9.99}'  # should return 201 with item
+curl localhost:8000/items/1               # should return the created item
+
+# 5. Verify Docker HEALTHCHECK
+docker inspect --format='{{.State.Health.Status}}' test-app  # should be "healthy"
+
+# 6. Verify .dockerignore works (tests/ and .git should NOT be in the image)
+docker run --rm template-backend-python ls -la /app/          # should show src/ .venv/ pyproject.toml uv.lock — no tests/, no .git
+docker run --rm template-backend-python ls -la /app/tests 2>&1 # should fail
+
+# 7. Cleanup
+docker stop test-app && docker rm test-app
+docker rmi template-backend-python
+```
 
 ---
 
