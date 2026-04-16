@@ -299,7 +299,7 @@ git reset HEAD~1
      - `push: false`, `load: true` (loads into local daemon for smoke test / scan)
      - `tags: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}`
      - GHA cache only on GitHub, disabled under act via `${{ !env.ACT && 'type=gha' || '' }}` ternary (GHA cache requires GitHub infrastructure, doesn't work with `act`)
-  4. Trivy image scan — `aquasecurity/trivy-action@master`, `scan-type: image`, `severity: CRITICAL,HIGH`, `exit-code: '1'`, `ignore-unfixed: true` (don't fail on CVEs with no upstream fix — reduces noise; any CRITICAL/HIGH with a fix still stops the pipeline)
+  4. Trivy image scan — **direct CLI invocation**, not `aquasecurity/trivy-action`. First install Trivy with `aquasecurity/setup-trivy@v0.2.6` (pinned; `version: v0.69.3`). Then a plain `run:` step executes `trivy image --format sarif --output trivy-image-results.sarif --severity CRITICAL,HIGH --ignore-unfixed --ignorefile .trivyignore --exit-code 1 "$IMAGE_REF"`. Any CRITICAL/HIGH CVE with an upstream fix (and not in `.trivyignore`) stops the pipeline. **Why not `aquasecurity/trivy-action`?** When `format: sarif` is combined with `exit-code: '1'`, the action runs Trivy twice — once for SARIF, once for the gate — and the `trivyignores` input is only wired to the SARIF run. Entries in `.trivyignore` are therefore ignored for the gate, causing the step to fail on CVEs you've explicitly accepted. Calling the CLI ourselves is one invocation, deterministic, and reproducible with an identical command locally via `docker run aquasec/trivy:0.69.3`.
   5. Upload Trivy image SARIF (`category: trivy-image`) — same guard pattern as Job 2
   6. Container smoke test — runs the built image, waits up to 30s for readiness, then:
      - `curl /health` and verify `"status":"ok"` (tolerating whitespace in the JSON)
@@ -334,6 +334,12 @@ git reset HEAD~1
 - Tag with commit SHA only. Document why `latest` is an anti-pattern in production (non-deterministic rollbacks, cache inconsistencies across nodes, no traceability to source).
 
 **General `act` skip rule:** Only skip steps that have external side effects not available locally: registry login/push, `upload-artifact`, `upload-sarif`, and the image-tar handoff between jobs (not reachable under act anyway). Everything else (build, scan, lint, test, smoke test) runs both on GitHub and locally.
+
+**`.trivyignore` — time-boxed CVE exceptions:** When a CRITICAL/HIGH CVE has an upstream fix but cannot be applied yet (typical case: Debian patch released, but the Docker Library hasn't rebuilt `python:3.12.x-slim` to include it, so pinned digests still carry the vulnerable version), add the CVE ID to `.trivyignore` with:
+- a comment explaining the reason (which tags/digests are affected, when it was verified)
+- an `exp:YYYY-MM-DD` directive so Trivy resumes flagging once the expiration passes
+
+Remove the entry as soon as Dependabot opens the base image bump PR. `.trivyignore` is committed to the repo (not in `.gitignore`) so every developer and CI run shares the same allow-list. Exhaust alternatives first (digest bump, dependency bump, Dockerfile patch) — ignoring a CVE is a last resort.
 
 **Local runs require `GITHUB_TOKEN`:** `aquasecurity/trivy-action` (and a few other composite actions in this pipeline) internally invoke `actions/checkout` to fetch install scripts. On GitHub the runner auto-provisions `GITHUB_TOKEN`; under `act` it does not, and the checkout fails with `::error::Input required and not supplied: token`. Each invocation of `act` must therefore receive a token.
 
