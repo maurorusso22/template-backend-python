@@ -250,61 +250,82 @@ git reset HEAD~1
 
 **Critical:** The workflow file must live at `.github/workflows/ci.yml` in the root of the repo. GitHub Actions only discovers workflows in this exact path — files placed elsewhere are invisible to the runner.
 
+**Workflow-level configuration:**
+- **Triggers:** push to `main`, pull requests against `main`.
+- **Environment variables** (change per project):
+  - `PYTHON_VERSION` — Python version to install
+  - `APP_NAME` — Application name
+  - `DOCKER_IMAGE_NAME` — Docker image name
+- **Permissions:** least-privilege default `contents: read` at workflow level; jobs override per-need (e.g., `security-events: write` for SARIF upload, `packages: write` for ghcr.io push).
+
 **Pipeline structure — 4 jobs:**
 
 #### Job 1: `quality` (Code Quality & Testing)
 - **Runs:** Always (push to main, PRs)
 - **Steps:**
-  1. Checkout code
+  1. Checkout code (`actions/checkout@v4`)
   2. Install uv (`astral-sh/setup-uv@v3`)
-  3. Set up Python (via uv)
-  4. Install dependencies (`uv sync --all-extras`)
+  3. Set up Python — `uv python install ${{ env.PYTHON_VERSION }}`
+  4. Install dependencies — `uv sync --all-extras` (id: `install`)
   5. Format check — `uv run ruff format --check .` (id: `format-check`)
-  6. Lint + import sorting — `uv run ruff check .` (if previous succeeded — fail-fast cascade)
-  7. Type check — `uv run mypy src/` (if previous succeeded)
-  8. Tests with coverage — `uv run pytest --cov=src --cov-report=xml --cov-report=term --cov-fail-under=80` (if previous succeeded)
-  9. Upload coverage artifact — **only on GitHub** (`if: always() && !env.ACT`)
+  6. Lint + import sorting — `uv run ruff check .` (id: `lint`)
+  7. Type check — `uv run mypy src/` (id: `typecheck`)
+  8. Tests with coverage — `uv run pytest --cov=src --cov-report=xml --cov-report=term --cov-fail-under=80` (id: `tests`)
+  9. Upload coverage artifact — **only on GitHub** (`if: always() && !env.ACT`), `if-no-files-found: ignore`
 
-**Fail-fast cascade:** Each step has `if: steps.<previous>.outcome == 'success'`. This stops the pipeline at the first failure instead of running all checks and producing noisy output.
+**Fail-fast cascade:** Each step after install has `if: steps.<previous>.outcome == 'success'`. This stops the pipeline at the first failure instead of running every check and producing noisy output.
 
 #### Job 2: `dockerfile-security` (Static Analysis)
-- **Runs:** Always, including locally with `act`
-- **Needs:** `quality`
+- **Runs:** Always (including locally under `act`); **Needs:** `quality`
+- **Permissions:** `contents: read`, `security-events: write`
 - **Steps:**
   1. Checkout code
-  2. Hadolint — Lint the Dockerfile (`hadolint/hadolint-action@v3.0.0`)
-  3. Trivy config scan — Scan YAML/Dockerfile for misconfigurations (`aquasecurity/trivy-action@master`, `scan-type: config`)
-  4. Upload SARIF to GitHub Security tab — **only on GitHub** (`if: "!env.ACT"`)
+  2. Hadolint — `hadolint/hadolint-action@v3.1.0`, SARIF output, `no-fail: false`, `failure-threshold: error` (only error-level findings fail the build; style/info/warning surface in SARIF but do not block — raise to `warning` for stricter gates)
+  3. Upload Hadolint SARIF to GitHub Security (`category: hadolint`) — guarded: `!cancelled() && !env.ACT && hashFiles('hadolint-results.sarif') != ''` (publishes on both success and failure of the scan so error-level findings reach the Security tab; `hashFiles()` avoids phantom upload failures when no SARIF was produced; `!cancelled()` skips cleanly on workflow cancellation)
+  4. Trivy config scan — `aquasecurity/trivy-action@master`, `scan-type: config`, `severity: CRITICAL,HIGH`, `exit-code: '1'` (any CRITICAL/HIGH misconfig fails the step)
+  5. Upload Trivy config SARIF to GitHub Security (`category: trivy-config`) — same guard as Hadolint upload
+
+**Why two separate SARIF uploads:** distinct `category` values keep hadolint and trivy-config findings segregated in the Security tab for easier triage.
 
 **Why this runs locally too:** Hadolint and Trivy config scan are static — they read files, don't touch the Docker daemon, don't need network. There is no technical reason to skip them locally.
 
 #### Job 3: `build` (Docker Build & Image Security)
-- **Runs:** Always, including locally with `act`
-- **Needs:** `quality`
+- **Runs:** Always (including under `act`); **Needs:** `[quality, dockerfile-security]` (gated on dockerfile-security so a hadolint/Trivy-config failure stops the pipeline before wasting time building and scanning the image)
+- **Permissions:** `contents: read`, `security-events: write`
 - **Steps:**
   1. Checkout code
-  2. Setup Docker Buildx
-  3. Build Docker image — `docker/build-push-action@v6` with:
-     - `push: false`, `load: true` (loads into local daemon)
+  2. Set up Docker Buildx (`docker/setup-buildx-action@v3`)
+  3. Build Docker image — `docker/build-push-action@v6`:
+     - `push: false`, `load: true` (loads into local daemon for smoke test / scan)
      - `tags: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}`
-     - GHA cache only on GitHub, disabled locally via `env.ACT` ternary (GHA cache requires GitHub infrastructure, doesn't work with `act`)
-  4. Trivy image scan — Scan the built image for vulnerabilities (`aquasecurity/trivy-action@master`, `scan-type: image`)
-  5. Container smoke test — Start container, wait for readiness, `curl` the `/health` endpoint, verify JSON response
-  6. Upload SARIF — **only on GitHub** (`if: "!env.ACT"`)
-  7. Cleanup (act only) — `if: always() && env.ACT` → remove built image to prevent local accumulation
-
-**Why build runs locally:** Building validates the Dockerfile. Trivy image scan catches CVEs. The smoke test proves the container starts and responds. None of these require a registry. Skipping them locally means the Dockerfile is unverified.
+     - GHA cache only on GitHub, disabled under act via `${{ !env.ACT && 'type=gha' || '' }}` ternary (GHA cache requires GitHub infrastructure, doesn't work with `act`)
+  4. Trivy image scan — `aquasecurity/trivy-action@master`, `scan-type: image`, `severity: CRITICAL,HIGH`, `exit-code: '1'`, `ignore-unfixed: true` (don't fail on CVEs with no upstream fix — reduces noise; any CRITICAL/HIGH with a fix still stops the pipeline)
+  5. Upload Trivy image SARIF (`category: trivy-image`) — same guard pattern as Job 2
+  6. Container smoke test — runs the built image, waits up to 30s for readiness, then:
+     - `curl /health` and verify `"status":"ok"` (tolerating whitespace in the JSON)
+     - POST `/items` with `{"name":"smoke-test","price":9.99}`, verify the echoed name/price
+     - Extract the assigned `id` with plain `grep` (no `jq` dependency)
+     - GET `/items/:id` and assert the fetched payload is **byte-identical** to the created one via `diff` (FastAPI serializes both responses through the same `Item` model, so any divergence signals a real bug)
+     - Dumps container logs on failure; always stops and removes the `smoke-test` container
+  7. Save Docker image to tar — **only on main and on GitHub** (`if: github.ref == 'refs/heads/main' && !env.ACT`). Exports the smoke-tested, scanned image so the `push` job pushes exactly these bytes — not a rebuild from cache that could silently diverge.
+  8. Upload Docker image artifact (`actions/upload-artifact@v4`) — same condition; `compression-level: 0` (image layers are already compressed; zip "store" mode avoids redundant CPU for near-zero size savings), `retention-days: 1` (only consumed by the push job in the same run)
+  9. Cleanup built image — **act only** (`if: always() && env.ACT`). Removes the tagged image to avoid local tag accumulation across repeated runs. On GitHub runners the VM is ephemeral, so this is irrelevant there.
 
 **`env.ACT` for local detection:** `act` automatically sets `env.ACT=true`. This is the documented and reliable way to detect local execution. Do not use `github.actor != 'nektos/act'` — it is fragile and version-dependent.
 
 #### Job 4: `push` (Registry Push)
-- **Runs:** Only on push to main AND only on GitHub (not locally)
+- **Runs:** Only on push to main AND only on GitHub (`if: github.ref == 'refs/heads/main' && !env.ACT`)
 - **Needs:** `build`
-- **Condition:** `if: github.ref == 'refs/heads/main' && !env.ACT`
-- **Steps:**
-  1. Verify registry credentials — Debug step that prints whether `REGISTRY_USERNAME` and `REGISTRY_TOKEN` secrets exist (true/false). Without this, a missing secret causes a confusing "Cannot perform an interactive login from a non TTY device" error.
-  2. Log in to registry — `docker/login-action@v3` with `registry`, `username`, `password` from secrets/variables
-  3. Build and push — `docker/build-push-action@v6` with `push: true`, tag with commit SHA
+- **Permissions:** `contents: read`, `packages: write` (needed when pushing to ghcr.io)
+- **Steps:** (no checkout, no Buildx — this job pushes the exact bytes that `build` smoke-tested and scanned, loaded from the artifact)
+  1. Verify registry credentials — prints whether `REGISTRY_USERNAME`, `REGISTRY_TOKEN`, and `REGISTRY_URL` are configured, and **hard-fails with `exit 1` and an `::error::` annotation** if either secret is missing. Without this, a missing secret fails later with a confusing "Cannot perform an interactive login from a non TTY device" error.
+  2. Download Docker image artifact (`actions/download-artifact@v4`) — pulls the tar produced by `build`.
+  3. Load Docker image — `docker load -i /tmp/image.tar`.
+  4. Log in to registry — `docker/login-action@v3`. Empty `registry` input → defaults to Docker Hub.
+  5. Tag and push — plain `docker tag` + `docker push` (not `build-push-action`, since the image is already built). Target ref is computed at step level: `<REGISTRY_URL>/<image>:<sha>` when `REGISTRY_URL` is set, otherwise `<image>:<sha>` (Docker Hub). Exposes `target_ref` as a step output.
+  6. Registry push summary — on success, writes a markdown table (Image / Commit / Registry) to `GITHUB_STEP_SUMMARY`. Omitted on failure because the push step already surfaces the real error; a trailing "possible causes" narrative would only obscure it.
+
+**Push exactly what was scanned:** Instead of rebuilding in `push` (which risks cache divergence), `build` saves the image as a tar artifact and `push` loads and re-tags it. The bytes going to the registry are guaranteed identical to what Trivy scanned and the smoke test validated.
 
 **Registry-agnostic design:** The pipeline must not be hardcoded to Docker Hub. Requirements:
 - Secret names: `REGISTRY_USERNAME`, `REGISTRY_TOKEN` (not `DOCKER_USERNAME`/`DOCKER_TOKEN`)
@@ -312,12 +333,7 @@ git reset HEAD~1
 - The README must document how to configure for each major registry (Docker Hub, AWS ECR with OIDC, ghcr.io with `GITHUB_TOKEN`, ACR, Harbor/Nexus)
 - Tag with commit SHA only. Document why `latest` is an anti-pattern in production (non-deterministic rollbacks, cache inconsistencies across nodes, no traceability to source).
 
-**Pipeline environment variables:**
-- `PYTHON_VERSION` — Python version to install
-- `APP_NAME` — Application name (user changes this)
-- `DOCKER_IMAGE_NAME` — Docker image name (user changes this)
-
-**General `act` skip rule:** Only skip steps that have external side effects not available locally: `push`, `docker/login-action`, `upload-artifact`, `upload-sarif`. Everything else (build, scan, lint, test, smoke test) must run both on GitHub and locally.
+**General `act` skip rule:** Only skip steps that have external side effects not available locally: registry login/push, `upload-artifact`, `upload-sarif`, and the image-tar handoff between jobs (not reachable under act anyway). Everything else (build, scan, lint, test, smoke test) runs both on GitHub and locally.
 
 ---
 
