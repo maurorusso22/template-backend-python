@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# Trivy vulnerability ignore list.
+#
+# Every entry here is a known deviation from the pipeline's fail-on-
+# CRITICAL/HIGH stance in .github/workflows/ci.yml. Each entry MUST carry:
+#   - the CVE ID
+#   - a reason (why we cannot fix it right now)
+#   - an `exp:` date (Trivy resumes flagging after this date)
+#
+# Before adding an entry, exhaust the alternatives in order:
+#   1. Bump the base image digest in Dockerfile (Dependabot PR)
+#   2. Bump the affected Python dependency in pyproject.toml + uv.lock
+#   3. Patch the Dockerfile (only if 1 and 2 are unavailable)
+# Ignoring a CVE is the last resort.
+# ---------------------------------------------------------------------------
+
+# CVE-2026-28390 — OpenSSL: DoS via NULL pointer dereference in CMS (HIGH).
+# Affects the Debian packages libssl3t64, openssl, openssl-provider-legacy
+# (one source package, three binaries — Trivy reports it three times).
+# Fixed upstream in Debian trixie as 3.5.5-1~deb13u2, but the Docker Library
+# has not yet rebuilt python:3.12.x-slim to pick up the patch. Verified
+# 2026-04-16: python:3.12-slim and python:3.12.13-slim both resolve to
+# digest sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286
+# and both still ship libssl3t64 3.5.5-1~deb13u1.
+# Action: remove this entry once Dependabot opens a base image bump PR
+# against the new digest. The `exp:` date forces re-evaluation.
+CVE-2026-28390 exp:2026-05-31
