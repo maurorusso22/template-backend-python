@@ -57,7 +57,7 @@ template-backend-python/
 - Tool caches: `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`
 - Coverage: `htmlcov/`, `coverage.xml`, `.coverage`
 - Build: `dist/`, `*.egg-info/`
-- Secrets: `.env`
+- Secrets: `.env`, `.secrets` (the latter is consumed by `act --secret-file` for local CI runs — see Step 4)
 
 #### `pyproject.toml` requirements
 - **Package manager:** uv
@@ -334,6 +334,22 @@ git reset HEAD~1
 - Tag with commit SHA only. Document why `latest` is an anti-pattern in production (non-deterministic rollbacks, cache inconsistencies across nodes, no traceability to source).
 
 **General `act` skip rule:** Only skip steps that have external side effects not available locally: registry login/push, `upload-artifact`, `upload-sarif`, and the image-tar handoff between jobs (not reachable under act anyway). Everything else (build, scan, lint, test, smoke test) runs both on GitHub and locally.
+
+**Local runs require `GITHUB_TOKEN`:** `aquasecurity/trivy-action` (and a few other composite actions in this pipeline) internally invoke `actions/checkout` to fetch install scripts. On GitHub the runner auto-provisions `GITHUB_TOKEN`; under `act` it does not, and the checkout fails with `::error::Input required and not supplied: token`. Each invocation of `act` must therefore receive a token.
+
+**Per-repo approach (recommended).** Store the token once in a gitignored `.secrets` file at the repo root; `act` reads it automatically on every run.
+
+```bash
+# one-time setup
+echo "GITHUB_TOKEN=$(gh auth token)" > .secrets
+
+# every run
+act push --container-architecture linux/amd64 --secret-file .secrets
+```
+
+- `.secrets` **must** be gitignored (already listed in Step 1's `.gitignore` requirements). Committing it leaks a token that grants API access to the repos your `gh` session can see.
+- The token is the one from `gh auth login`. It stays valid until revoked or until you re-auth. If an act run fails with `401 Bad credentials`, re-run `gh auth login` and regenerate `.secrets`.
+- README (Step 9) must document this setup under "Running locally with `act`".
 
 ---
 
