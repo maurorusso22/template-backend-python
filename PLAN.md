@@ -314,16 +314,16 @@ git reset HEAD~1
 **`env.ACT` for local detection:** `act` automatically sets `env.ACT=true`. This is the documented and reliable way to detect local execution. Do not use `github.actor != 'nektos/act'` — it is fragile and version-dependent.
 
 #### Job 4: `push` (Registry Push)
-- **Runs:** Only on push to main AND only on GitHub (`if: github.ref == 'refs/heads/main' && !env.ACT`)
+- **Runs:** Only on push to main (`if: github.ref == 'refs/heads/main'` at job level). Under `act`, the job starts but every step is skipped via per-step `if: ${{ !env.ACT }}` guards. `env.ACT` is **not** valid in a job-level `if` — act's schema rejects it, and GitHub's docs restrict job-level `if` to the `github`, `needs`, `vars`, and `inputs` contexts — so the local-skip guard must live at step level.
 - **Needs:** `build`
 - **Permissions:** `contents: read`, `packages: write` (needed when pushing to ghcr.io)
-- **Steps:** (no checkout, no Buildx — this job pushes the exact bytes that `build` smoke-tested and scanned, loaded from the artifact)
+- **Steps:** (no checkout, no Buildx — this job pushes the exact bytes that `build` smoke-tested and scanned, loaded from the artifact. Every step below carries `if: ${{ !env.ACT }}` so the job is a no-op under `act`.)
   1. Verify registry credentials — prints whether `REGISTRY_USERNAME`, `REGISTRY_TOKEN`, and `REGISTRY_URL` are configured, and **hard-fails with `exit 1` and an `::error::` annotation** if either secret is missing. Without this, a missing secret fails later with a confusing "Cannot perform an interactive login from a non TTY device" error.
   2. Download Docker image artifact (`actions/download-artifact@v4`) — pulls the tar produced by `build`.
   3. Load Docker image — `docker load -i /tmp/image.tar`.
   4. Log in to registry — `docker/login-action@v3`. Empty `registry` input → defaults to Docker Hub.
   5. Tag and push — plain `docker tag` + `docker push` (not `build-push-action`, since the image is already built). Target ref is computed at step level: `<REGISTRY_URL>/<image>:<sha>` when `REGISTRY_URL` is set, otherwise `<image>:<sha>` (Docker Hub). Exposes `target_ref` as a step output.
-  6. Registry push summary — on success, writes a markdown table (Image / Commit / Registry) to `GITHUB_STEP_SUMMARY`. Omitted on failure because the push step already surfaces the real error; a trailing "possible causes" narrative would only obscure it.
+  6. Registry push summary — on success, writes a markdown table (Image / Commit / Registry) to `GITHUB_STEP_SUMMARY`. Guarded by `success() && !env.ACT` — omitted on failure because the push step already surfaces the real error; a trailing "possible causes" narrative would only obscure it.
 
 **Push exactly what was scanned:** Instead of rebuilding in `push` (which risks cache divergence), `build` saves the image as a tar artifact and `push` loads and re-tags it. The bytes going to the registry are guaranteed identical to what Trivy scanned and the smoke test validated.
 
@@ -337,7 +337,50 @@ git reset HEAD~1
 
 ---
 
-### Step 5: Git Submodule for Internal Docs
+### Step 5: Branch Protection on `main`
+
+**What:** Configure GitHub branch protection rules on `main` so direct pushes are blocked and every change goes through a PR with green CI.
+
+**When to apply:** After Step 4's pipeline has been **pushed to GitHub and run at least once (green)**. GitHub's "Require status checks to pass before merging" dropdown is populated from historical workflow runs — a check that has never executed is not selectable by name. Configuring protection before the first run means either the dropdown is empty or you save the rule with no checks selected and protection is a no-op. The correct order is always: push → first run completes green → configure protection and select the now-visible check names.
+
+**Rules to configure** (Settings → Branches → Add branch protection rule → Branch name pattern: `main`):
+
+1. **Require a pull request before merging** — no direct pushes to `main`.
+2. **Require approvals** — minimum 1 reviewer. Small teams: team lead. Larger teams: rotation.
+3. **Require status checks to pass before merging** — select every PR-triggered job from `ci.yml`: `quality`, `dockerfile-security`, `build`. The `push` job runs only on main, so it is not a PR check and will not appear in the dropdown.
+4. **Require branches to be up to date before merging** — PR must be synced with latest `main` before merge. Prevents two independently-green PRs from breaking `main` when combined. Trade-off: on high-traffic repos this causes a rebase treadmill (each merge invalidates every other open PR's up-to-date status). For a backend template used by small teams this is acceptable.
+5. **Do not allow force pushes** — never on `main`.
+6. **Do not allow deletions** — never on `main`.
+7. **Require linear history** (recommended) — forces squash or rebase merges; no merge commits. History stays readable with `git log --oneline`. Pairs naturally with rule 4.
+
+**Applies to two places:**
+- This template repo itself — configure once as part of shipping the template.
+- Every new repo created from this template — GitHub does **not** carry branch protection rules across template copies. The README (Step 9) must document this as a mandatory post-bootstrap step for downstream users.
+
+**Optional automation (out of scope for v1):** these rules can be codified via `gh api repos/:owner/:repo/branches/main/protection` calls or the Terraform `integrations/github` provider so they're reproducible across repos created from this template. Worth considering once a handful of repos exist.
+
+#### Verification
+```bash
+# 1. Direct push to main must be rejected
+git checkout main
+git commit --allow-empty -m "test: direct push"
+git push origin main
+# Expected: remote: error: GH006: Protected branch update failed for refs/heads/main
+
+# 2. Force-push to main must be rejected
+git push --force origin main
+# Expected: remote: error: GH003: Sorry, force-pushing to main is not allowed
+
+# 3. Open a PR with a deliberately failing check — the "Merge" button must be disabled
+#    (manual verification in the GitHub UI)
+
+# 4. Open a PR that is behind main — the UI must show "This branch is out-of-date with the base branch"
+#    and block merge until updated (manual verification)
+```
+
+---
+
+### Step 6: Git Submodule for Internal Docs
 
 **What:** Add a git submodule pointing to a private repository for internal documentation.
 
@@ -355,7 +398,7 @@ git reset HEAD~1
 
 ---
 
-### Step 6: Dependabot Configuration
+### Step 7: Dependabot Configuration
 
 **What:** Create `.github/dependabot.yml` for automated dependency updates.
 
@@ -368,7 +411,7 @@ git reset HEAD~1
 
 ---
 
-### Step 7: PR Template
+### Step 8: PR Template
 
 **What:** Create `.github/pull_request_template.md`.
 
@@ -380,7 +423,7 @@ git reset HEAD~1
 
 ---
 
-### Step 8: README.md
+### Step 9: README.md
 
 **What:** Comprehensive template documentation.
 
@@ -398,20 +441,23 @@ git reset HEAD~1
    - Initialize submodule: `git submodule update --init`
    - Run tests: `uv run pytest`
    - Run pipeline locally: `act -j quality`
+   - Push to GitHub, wait for the first CI run to complete green, **then** configure branch protection on `main` (see section 4) — this ordering is required because the "Require status checks" dropdown is populated from historical runs
 
-4. **How to customize** — Adding endpoints, adding DB dependencies, changing Python version, adjusting coverage threshold
+4. **Branch Protection on `main`** — Required rules to configure (PR required, ≥1 approval, CI checks required, up-to-date-before-merge, no force push, no deletion, linear history), why it must be applied to every repo created from this template (GitHub does not carry protection rules across template copies), and why it must be done **after** the first green CI run (check names are only selectable once the workflow has executed at least once).
 
-5. **CI Pipeline: what it does, job by job** — Description of each job, what runs locally vs. only on GitHub, how to read the Actions panel
+5. **How to customize** — Adding endpoints, adding DB dependencies, changing Python version, adjusting coverage threshold
 
-6. **Registry Configuration** — How to configure for Docker Hub, AWS ECR (OIDC), ghcr.io (`GITHUB_TOKEN`), ACR, Harbor/Nexus/Artifactory. Table of required secrets/variables per registry.
+6. **CI Pipeline: what it does, job by job** — Description of each job, what runs locally vs. only on GitHub, how to read the Actions panel
 
-7. **Internal Documentation (submodule)** — Init, update, access requirements
+7. **Registry Configuration** — How to configure for Docker Hub, AWS ECR (OIDC), ghcr.io (`GITHUB_TOKEN`), ACR, Harbor/Nexus/Artifactory. Table of required secrets/variables per registry.
 
-8. **Running locally with `act`** — Install, run all, run specific job, what gets skipped locally and why, what still runs locally
+8. **Internal Documentation (submodule)** — Init, update, access requirements
 
-9. **Pre-commit hooks** — List of hooks, Conventional Commits format, manual run command
+9. **Running locally with `act`** — Install, run all, run specific job, what gets skipped locally and why, what still runs locally
 
-10. **Design decisions** — Why uv, why ruff, why fail-fast cascade, why patch-level Docker pinning, why non-root container user
+10. **Pre-commit hooks** — List of hooks, Conventional Commits format, manual run command
+
+11. **Design decisions** — Why uv, why ruff, why fail-fast cascade, why patch-level Docker pinning, why non-root container user
 
 ---
 
@@ -423,10 +469,11 @@ git reset HEAD~1
 | 2 | Dockerfile | Step 1 | 1 file |
 | 3 | Pre-commit config | Step 1 | 1 file |
 | 4 | CI pipeline | Steps 1, 2 | 1 file |
-| 5 | Git submodule for internal docs | — | .gitmodules + directory |
-| 6 | Dependabot config | Steps 2, 4 | 1 file |
-| 7 | PR template | — | 1 file |
-| 8 | README.md | All above | 1 file |
+| 5 | Branch protection on `main` | Step 4 (first green run on GitHub) | — (GitHub settings) |
+| 6 | Git submodule for internal docs | — | .gitmodules + directory |
+| 7 | Dependabot config | Steps 2, 4 | 1 file |
+| 8 | PR template | — | 1 file |
+| 9 | README.md | All above | 1 file |
 
 **After all files are created:**
 1. Run `uv sync` to generate `uv.lock`
@@ -434,7 +481,8 @@ git reset HEAD~1
 3. Run `uv run pytest` to verify tests pass
 4. Run `act -j quality` to verify pipeline runs locally (requires act + Docker)
 5. Push to GitHub and verify pipeline runs green in Actions tab
-6. Include link to green run in the delivery
+6. Configure branch protection on `main` (Step 5) — check names are now visible in the "Require status checks" dropdown because the first run has populated them
+7. Include link to green run in the delivery
 
 ---
 
@@ -456,3 +504,6 @@ Before considering the template done:
 - [ ] Pipeline runs green on GitHub Actions (link in PR)
 - [ ] All jobs visible in Actions tab, no unexpected skips
 - [ ] Trivy SARIF appears in Security tab on GitHub
+- [ ] Branch protection on `main` configured: PR required, ≥1 approval, CI checks required (`quality`, `dockerfile-security`, `build`), up-to-date-before-merge, no force push, no deletion, linear history
+- [ ] Direct push to `main` rejected (verified)
+- [ ] Force push to `main` rejected (verified)
