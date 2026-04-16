@@ -20,6 +20,7 @@ coverage.xml
 
 # Secrets
 .env
+.secrets
 
 # IDE
 .idea/
