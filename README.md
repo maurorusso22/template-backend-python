@@ -1,5 +1,7 @@
 # template-backend-python
 
+[![CI](https://github.com/maurorusso22/template-backend-python/actions/workflows/ci.yml/badge.svg)](https://github.com/maurorusso22/template-backend-python/actions/workflows/ci.yml)
+
 A production-ready template for Python backend projects. Clone it, rename a few values, and start building — CI/CD pipeline, Docker, pre-commit hooks, and security scanning are already wired up.
 
 ## When to use this template
@@ -138,6 +140,12 @@ The `push` job runs only on `main` (not on PRs), so it will not appear in the st
 
 The pipeline runs on every push to `main` and every PR against `main`. It is defined in `.github/workflows/ci.yml`.
 
+The four jobs run sequentially — each one depends on the previous passing:
+
+![CI pipeline overview](docs/images/ci/gh_action.png)
+
+> **About "Post" steps in the screenshots below:** GitHub Actions automatically adds cleanup steps prefixed with "Post" (e.g., "Post Checkout code", "Post Install uv"). These are **not** defined in `ci.yml` — they are internal teardown routines that GitHub runs after a job completes to clean up resources allocated by `uses:` actions (revoke tokens, free caches, remove credentials). They are normal and expected.
+
 ### Job 1: `quality` — Code Quality & Testing
 
 Runs format check, linting, type checking, and tests in a **fail-fast cascade** — each step is gated on the previous step's success, so the pipeline stops at the first failure.
@@ -149,6 +157,8 @@ Runs format check, linting, type checking, and tests in a **fail-fast cascade** 
 | Type check | `mypy src/` | Static type analysis |
 | Tests | `pytest --cov=src --cov-fail-under=80` | Unit tests with ≥80% coverage gate |
 
+![Quality job steps](docs/images/ci/job_quality.png)
+
 ### Job 2: `dockerfile-security` — Dockerfile Static Analysis
 
 Runs after `quality` passes. Scans the Dockerfile and repo configs without touching the Docker daemon.
@@ -158,6 +168,8 @@ Runs after `quality` passes. Scans the Dockerfile and repo configs without touch
 
 Both tools upload SARIF results to the GitHub **Security → Code scanning** tab (on GitHub only, skipped under `act`).
 
+![Dockerfile analysis job steps](docs/images/ci/job_dockerfile_analysis.png)
+
 ### Job 3: `build` — Docker Build & Image Security
 
 Runs after `quality` and `dockerfile-security` both pass. Builds the Docker image, scans it, and smoke-tests it.
@@ -166,6 +178,8 @@ Runs after `quality` and `dockerfile-security` both pass. Builds the Docker imag
 2. **Trivy image scan** — Scans the built image for CVEs. CRITICAL/HIGH with a known fix fail the build (unfixed CVEs are ignored). CVEs listed in `.trivyignore` with an `exp:YYYY-MM-DD` date are temporarily accepted.
 3. **Smoke test** — Starts the container, waits for readiness, then validates `GET /health`, `POST /items`, and `GET /items/{id}` round-trip. Fails if any response is unexpected.
 4. **Artifact handoff** — On `main` only, saves the image as a tar artifact for the push job.
+
+![Docker build job steps](docs/images/ci/job_docker_build.png)
 
 ### Job 4: `push` — Push to Registry
 
@@ -177,6 +191,8 @@ Runs only on push to `main` (skipped on PRs). Loads the exact image that was sca
 4. Tags with the commit SHA and pushes.
 
 Under `act`, the job starts but every step is skipped (registry push is a GitHub-only side effect).
+
+![Push job steps](docs/images/ci/job_push.png)
 
 ### What runs where
 
