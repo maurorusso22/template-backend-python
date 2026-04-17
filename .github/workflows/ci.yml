@@ -1,0 +1,398 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Workflow-level env vars — change these per project.
+env:
+  PYTHON_VERSION: "3.12"
+  APP_NAME: template-backend-python           # TODO: change to your application name
+  DOCKER_IMAGE_NAME: template-backend-python  # TODO: change to your Docker image name
+
+# Least-privilege defaults; jobs override what they need (e.g. security-events: write).
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Job 1: quality — format, lint, type-check, test with coverage.
+  # Fail-fast cascade: each step is gated on the previous step's success so
+  # the pipeline stops at the first failure instead of running every check and
+  # producing noisy output.
+  # ----------------------------------------------------------------------------
+  quality:
+    name: Code Quality & Testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        id: install
+        run: uv sync --all-extras
+
+      - name: Format check (ruff)
+        id: format-check
+        if: steps.install.outcome == 'success'
+        run: uv run ruff format --check .
+
+      - name: Lint + import sorting (ruff)
+        id: lint
+        if: steps.format-check.outcome == 'success'
+        run: uv run ruff check .
+
+      - name: Type check (mypy)
+        id: typecheck
+        if: steps.lint.outcome == 'success'
+        run: uv run mypy src/
+
+      - name: Tests with coverage
+        id: tests
+        if: steps.typecheck.outcome == 'success'
+        run: uv run pytest --cov=src --cov-report=xml --cov-report=term --cov-fail-under=80
+
+      # Skipped under act (no GitHub artifact storage locally).
+      - name: Upload coverage artifact
+        if: always() && !env.ACT
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  # ----------------------------------------------------------------------------
+  # Job 2: dockerfile-security — static analysis of the Dockerfile and repo
+  # configs. Fully local-compatible (reads files only, no Docker daemon, no
+  # network). Only the SARIF uploads are skipped under act.
+  # ----------------------------------------------------------------------------
+  dockerfile-security:
+    name: Dockerfile Static Analysis
+    runs-on: ubuntu-latest
+    needs: quality # only run if quality checks pass
+    permissions:
+      contents: read
+      security-events: write  # required for upload-sarif
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Hadolint (Dockerfile lint)
+        id: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          format: sarif
+          output-file: hadolint-results.sarif
+          # Fail the step on any finding — stops the pipeline at first failure.
+          no-fail: false
+          # Only error-level findings fail the build; style/info/warning are
+          # surfaced via SARIF but do not block. Raise to 'warning' if stricter.
+          failure-threshold: error
+
+      - name: Upload Hadolint SARIF to GitHub Security
+        # Publish on both success and failure of the scan so findings still
+        # reach the Security tab when hadolint flags errors (the case that
+        # matters most for triage). Guarded by hashFiles() to avoid phantom
+        # upload failures when the scan was skipped and no SARIF was produced.
+        # !cancelled() skips cleanly on workflow cancellation.
+        if: ${{ !cancelled() && !env.ACT && hashFiles('hadolint-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint-results.sarif
+          category: hadolint
+
+      - name: Trivy config scan (Dockerfile + YAML misconfig)
+        id: trivy-config
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          format: sarif
+          output: trivy-config-results.sarif
+          severity: CRITICAL,HIGH
+          # Fail the step on any CRITICAL/HIGH finding — stops the pipeline.
+          exit-code: '1'
+
+      - name: Upload Trivy config SARIF to GitHub Security
+        # Publish on both success and failure of the scan so findings still
+        # reach the Security tab when Trivy flags CRITICAL/HIGH (the case that
+        # matters most for triage). Guarded by hashFiles() to avoid phantom
+        # upload failures when the scan was skipped and no SARIF was produced.
+        # !cancelled() skips cleanly on workflow cancellation.
+        if: ${{ !cancelled() && !env.ACT && hashFiles('trivy-config-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config-results.sarif
+          category: trivy-config
+
+  # ----------------------------------------------------------------------------
+  # Job 3: build — build the Docker image, scan it with Trivy, smoke-test it.
+  # Runs locally under act too (no registry needed). Only GHA cache and SARIF
+  # upload are skipped locally.
+  # ----------------------------------------------------------------------------
+  build:
+    name: Docker Build & Image Security
+    runs-on: ubuntu-latest
+    # Gated on dockerfile-security so a hadolint/Trivy-config failure stops
+    # the pipeline before we waste time building and scanning the image.
+    needs: [quality, dockerfile-security]
+    permissions:
+      contents: read
+      security-events: write  # required for upload-sarif
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true  # load into local daemon for smoke test / scan
+          tags: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          # GHA cache requires GitHub infrastructure — disable under act.
+          cache-from: ${{ !env.ACT && 'type=gha' || '' }}
+          cache-to: ${{ !env.ACT && 'type=gha,mode=max' || '' }}
+
+      # Install Trivy directly rather than using aquasecurity/trivy-action.
+      # The action runs Trivy twice when `format: sarif` and `exit-code: '1'`
+      # are combined (once to produce SARIF, once to gate the step), and the
+      # `trivyignores` input is not consistently wired to the gate run —
+      # entries in .trivyignore are respected for the SARIF but ignored for
+      # the exit-code check. We bypass that by calling the CLI ourselves.
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.6
+        with:
+          version: v0.69.3
+
+      - name: Trivy image scan (CVEs in built image)
+        id: trivy-image
+        env:
+          IMAGE_REF: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+        # --ignorefile .trivyignore — allow-list of CVEs we temporarily
+        #   accept; each entry carries a justification and an `exp:` date.
+        # --ignore-unfixed — don't fail on CVEs with no upstream fix (noise).
+        # --severity CRITICAL,HIGH + --exit-code 1 — any CRITICAL/HIGH CVE
+        #   with a known fix (and not in .trivyignore) stops the pipeline.
+        # --format sarif + --output — SARIF for the Security tab upload.
+        run: |
+          trivy image \
+            --format sarif \
+            --output trivy-image-results.sarif \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 1 \
+            "$IMAGE_REF"
+
+      - name: Upload Trivy image SARIF to GitHub Security
+        # Publish on both success and failure of the scan so findings still
+        # reach the Security tab when Trivy flags CVEs (the case that matters
+        # most for triage). Guarded by hashFiles() to avoid phantom upload
+        # failures when the scan was skipped and no SARIF was produced.
+        # !cancelled() skips cleanly on workflow cancellation.
+        if: ${{ !cancelled() && !env.ACT && hashFiles('trivy-image-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image-results.sarif
+          category: trivy-image
+
+      - name: Container smoke test
+        run: |
+          set -e
+          IMAGE="${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}"
+          docker run -d --name smoke-test -p 8000:8000 "$IMAGE"
+
+          # Wait for readiness (up to 30s)
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health -o /tmp/health.json; then
+              ready=1
+              break
+            fi
+            echo "Waiting for container... ($i/30)"
+            sleep 1
+          done
+
+          echo "=== Container logs ==="
+          docker logs smoke-test || true
+
+          if [ "$ready" -ne 1 ]; then
+            echo "Container did not become ready in time"
+            docker stop smoke-test >/dev/null 2>&1 || true
+            docker rm smoke-test >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          echo "=== /health response ==="
+          cat /tmp/health.json
+          echo ""
+
+          # Verify JSON — tolerate optional whitespace
+          grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' /tmp/health.json
+
+          # Round-trip /items: POST a new item, then GET it back and
+          # verify the fetched payload is byte-identical to what was created.
+          echo "=== POST /items ==="
+          curl -sf -X POST http://localhost:8000/items \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"smoke-test","price":9.99}' \
+            -o /tmp/created.json
+          cat /tmp/created.json
+          echo ""
+
+          # Sanity-check the values we sent are reflected in the response.
+          grep -Eq '"name"[[:space:]]*:[[:space:]]*"smoke-test"' /tmp/created.json
+          grep -Eq '"price"[[:space:]]*:[[:space:]]*9\.99' /tmp/created.json
+
+          # Extract the assigned id (dependency-free — no jq required).
+          ITEM_ID=$(grep -Eo '"id"[[:space:]]*:[[:space:]]*[0-9]+' /tmp/created.json | grep -Eo '[0-9]+$')
+          if [ -z "$ITEM_ID" ]; then
+            echo "Could not extract id from POST response"
+            docker stop smoke-test >/dev/null 2>&1 || true
+            docker rm smoke-test >/dev/null 2>&1 || true
+            exit 1
+          fi
+          echo "Created item id=$ITEM_ID"
+
+          echo "=== GET /items/$ITEM_ID ==="
+          curl -sf "http://localhost:8000/items/$ITEM_ID" -o /tmp/fetched.json
+          cat /tmp/fetched.json
+          echo ""
+
+          # FastAPI serializes both responses through the same Item model,
+          # so the fetched payload must be byte-identical to the created one.
+          if ! diff /tmp/created.json /tmp/fetched.json; then
+            echo "Fetched item does not match created item"
+            docker stop smoke-test >/dev/null 2>&1 || true
+            docker rm smoke-test >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          docker stop smoke-test
+          docker rm smoke-test
+
+      # Export the smoke-tested, scanned image so the push job pushes exactly
+      # these bytes — not a rebuild from cache that could silently diverge.
+      # Skipped under act (no artifact storage) and on non-main refs (the
+      # push job only runs on main, so the artifact would be unused).
+      - name: Save Docker image to tar
+        if: github.ref == 'refs/heads/main' && !env.ACT
+        run: docker save "${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}" -o /tmp/image.tar
+
+      - name: Upload Docker image artifact
+        if: github.ref == 'refs/heads/main' && !env.ACT
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar
+          # Image layers are already compressed; zip "store" mode (0) avoids
+          # redundant CPU work for near-zero size savings.
+          compression-level: 0
+          # Only consumed by the push job in the same run.
+          retention-days: 1
+
+      # Under act, remove the built image to avoid accumulating tags locally
+      # across repeated runs. On GitHub runners this is irrelevant (ephemeral VM).
+      - name: Cleanup built image (act only)
+        if: always() && env.ACT
+        run: docker rmi "${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}" || true
+
+  # ----------------------------------------------------------------------------
+  # Job 4: push — build & push to registry. Only on push to main, only on
+  # GitHub (never under act). Registry-agnostic: works with Docker Hub, ghcr.io,
+  # ECR, ACR, Harbor, Nexus, Artifactory — configured via secrets/variables.
+  # ----------------------------------------------------------------------------
+  push:
+    name: Push to Registry
+    runs-on: ubuntu-latest
+    needs: build
+    # Only run on main. `env.ACT` is NOT valid in a job-level `if` (act's
+    # schema rejects it outright, and GitHub's docs restrict job-level `if`
+    # to github/needs/vars/inputs). The !env.ACT guard lives on each step
+    # below, so under act the job starts but every step is skipped.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write  # needed when pushing to ghcr.io
+    steps:
+      # No checkout or Buildx needed — this job pushes the exact bytes that
+      # the build job smoke-tested and scanned, loaded from the artifact.
+
+      # Without this, a missing secret fails later with a confusing
+      # "Cannot perform an interactive login from a non TTY device" error.
+      - name: Verify registry credentials are configured
+        if: ${{ !env.ACT }}
+        run: |
+          echo "REGISTRY_USERNAME configured: ${{ secrets.REGISTRY_USERNAME != '' }}"
+          echo "REGISTRY_TOKEN configured:    ${{ secrets.REGISTRY_TOKEN != '' }}"
+          echo "REGISTRY_URL (variable):      ${{ vars.REGISTRY_URL || '(empty → Docker Hub default)' }}"
+          if [ -z "${{ secrets.REGISTRY_USERNAME }}" ] || [ -z "${{ secrets.REGISTRY_TOKEN }}" ]; then
+            echo "::error::Registry credentials are missing. Configure REGISTRY_USERNAME and REGISTRY_TOKEN repository secrets."
+            exit 1
+          fi
+
+      - name: Download Docker image artifact
+        if: ${{ !env.ACT }}
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        if: ${{ !env.ACT }}
+        run: docker load -i /tmp/image.tar
+
+      # Empty registry input → docker/login-action defaults to Docker Hub.
+      - name: Log in to registry
+        if: ${{ !env.ACT }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY_URL }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      # Tag with commit SHA only. `latest` is avoided by design:
+      # non-deterministic rollbacks, cache inconsistency across nodes, and
+      # no traceability back to a specific commit.
+      - name: Tag and push
+        id: push
+        if: ${{ !env.ACT }}
+        env:
+          SOURCE_REF: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          TARGET_REF: ${{ vars.REGISTRY_URL != '' && format('{0}/{1}:{2}', vars.REGISTRY_URL, env.DOCKER_IMAGE_NAME, github.sha) || format('{0}:{1}', env.DOCKER_IMAGE_NAME, github.sha) }}
+        run: |
+          set -e
+          docker tag "$SOURCE_REF" "$TARGET_REF"
+          docker push "$TARGET_REF"
+          echo "target_ref=$TARGET_REF" >> "$GITHUB_OUTPUT"
+
+      # Success-only: if the push step failed, that step already failed the
+      # job with the real error — a trailing "possible causes" narrative here
+      # would only obscure it.
+      - name: Registry push summary
+        if: ${{ success() && !env.ACT }}
+        env:
+          TARGET_REF: ${{ steps.push.outputs.target_ref }}
+        run: |
+          {
+            echo "### Registry push"
+            echo ""
+            echo "| Field    | Value |"
+            echo "| -------- | ----- |"
+            echo "| Image    | \`$TARGET_REF\` |"
+            echo "| Commit   | \`${{ github.sha }}\` |"
+            echo "| Registry | \`${{ vars.REGISTRY_URL || 'docker.io (default)' }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed $TARGET_REF"
