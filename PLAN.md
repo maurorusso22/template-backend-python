@@ -355,15 +355,76 @@ act push --container-architecture linux/amd64 --secret-file .secrets
 
 - `.secrets` **must** be gitignored (already listed in Step 1's `.gitignore` requirements). Committing it leaks a token that grants API access to the repos your `gh` session can see.
 - The token is the one from `gh auth login`. It stays valid until revoked or until you re-auth. If an act run fails with `401 Bad credentials`, re-run `gh auth login` and regenerate `.secrets`.
-- README (Step 9) must document this setup under "Running locally with `act`".
+- README (Step 10) must document this setup under "Running locally with `act`".
 
 ---
 
-### Step 5: Branch Protection on `main`
+### Step 5: First GitHub Run (GHCR)
+
+**What:** Push the pipeline to GitHub, verify all jobs pass on a PR, and validate the `push` job on `main`.
+
+**Pre-requisite:** The pipeline has been verified locally with `act` (Step 4). This step covers GitHub-specific setup only.
+
+#### 5a. Enable GitHub Actions
+
+Repo → **Settings → Actions → General**:
+- "Allow all actions and reusable workflows" (or allow the specific actions used in `ci.yml`).
+- Workflow permissions → **Read and write permissions**. The per-job `permissions:` blocks in `ci.yml` narrow this to least-privilege, but the workflow-level setting must be permissive enough to allow `security-events: write` (SARIF uploads) and `packages: write` (GHCR push).
+
+#### 5b. Configure GHCR secrets and variables
+
+The `push` job needs registry credentials. These must be in place before the first merge to `main` (the `push` job only runs on `main`).
+
+1. Create a **Classic PAT** at github.com/settings/tokens with scopes: `write:packages`, `read:packages`. Fine-grained tokens do not support GHCR yet.
+2. Repo → Settings → Secrets and variables → Actions:
+
+| Type | Name | Value |
+|------|------|-------|
+| Secret | `REGISTRY_USERNAME` | Your GitHub username |
+| Secret | `REGISTRY_TOKEN` | The Classic PAT from step 1 |
+| Variable | `REGISTRY_URL` | `ghcr.io/<your-username>` |
+
+The resulting image target will be `ghcr.io/<username>/<DOCKER_IMAGE_NAME>:<commit-sha>`.
+
+#### 5c. Push branch and open a PR to main
+
+```bash
+git push -u origin <your-branch>
+gh pr create --base main --head <your-branch> --title "CI pipeline" --body "Verify CI."
+```
+
+This triggers jobs 1–3 (`quality`, `dockerfile-security`, `build`). The `push` job is gated on `github.ref == 'refs/heads/main'` and will be correctly skipped on the PR.
+
+```bash
+# Watch the run
+gh pr checks --watch
+```
+
+Expected: `quality`, `dockerfile-security`, `build` green; `push` skipped.
+
+#### 5d. Merge to main and verify the push job
+
+After the PR is green, merge it. The push to `main` triggers a full run including the `push` job:
+
+```bash
+gh run watch
+```
+
+Expected: all 4 jobs green. The image appears at github.com → your profile → Packages (or the repo's Packages sidebar).
+
+**Package visibility:** GHCR creates packages as **private** by default. To allow anonymous pulls, go to the package page → Package settings → Change visibility to public.
+
+#### 5e. Verify SARIF in Security tab
+
+After the first green run, confirm SARIF uploads landed under repo → **Security → Code scanning**. The sidebar shows two tools: **Hadolint** and **Trivy** (GitHub groups by tool name, not by the `category` values in `ci.yml` — so the two Trivy uploads, config + image, merge under a single "Trivy" entry). Both should show a green checkmark. A clean scan means no alerts listed — "No summary of scanned files reported" is the expected result when there are zero findings.
+
+---
+
+### Step 6: Branch Protection on `main`
 
 **What:** Configure GitHub branch protection rules on `main` so direct pushes are blocked and every change goes through a PR with green CI.
 
-**When to apply:** After Step 4's pipeline has been **pushed to GitHub and run at least once (green)**. GitHub's "Require status checks to pass before merging" dropdown is populated from historical workflow runs — a check that has never executed is not selectable by name. Configuring protection before the first run means either the dropdown is empty or you save the rule with no checks selected and protection is a no-op. The correct order is always: push → first run completes green → configure protection and select the now-visible check names.
+**When to apply:** After Step 5's first GitHub run has **completed green**. GitHub's "Require status checks to pass before merging" dropdown is populated from historical workflow runs — a check that has never executed is not selectable by name. Configuring protection before the first run means either the dropdown is empty or you save the rule with no checks selected and protection is a no-op. The correct order is always: push → first run completes green → configure protection and select the now-visible check names.
 
 **Rules to configure** (Settings → Branches → Add branch protection rule → Branch name pattern: `main`):
 
@@ -377,7 +438,7 @@ act push --container-architecture linux/amd64 --secret-file .secrets
 
 **Applies to two places:**
 - This template repo itself — configure once as part of shipping the template.
-- Every new repo created from this template — GitHub does **not** carry branch protection rules across template copies. The README (Step 9) must document this as a mandatory post-bootstrap step for downstream users.
+- Every new repo created from this template — GitHub does **not** carry branch protection rules across template copies. The README (Step 10) must document this as a mandatory post-bootstrap step for downstream users.
 
 **Optional automation (out of scope for v1):** these rules can be codified via `gh api repos/:owner/:repo/branches/main/protection` calls or the Terraform `integrations/github` provider so they're reproducible across repos created from this template. Worth considering once a handful of repos exist.
 
@@ -402,7 +463,7 @@ git push --force origin main
 
 ---
 
-### Step 6: Git Submodule for Internal Docs
+### Step 7: Git Submodule for Internal Docs
 
 **What:** Add a git submodule pointing to a private repository for internal documentation.
 
@@ -420,7 +481,7 @@ git push --force origin main
 
 ---
 
-### Step 7: Dependabot Configuration
+### Step 8: Dependabot Configuration
 
 **What:** Create `.github/dependabot.yml` for automated dependency updates.
 
@@ -433,7 +494,7 @@ git push --force origin main
 
 ---
 
-### Step 8: PR Template
+### Step 9: PR Template
 
 **What:** Create `.github/pull_request_template.md`.
 
@@ -445,7 +506,7 @@ git push --force origin main
 
 ---
 
-### Step 9: README.md
+### Step 10: README.md
 
 **What:** Comprehensive template documentation.
 
@@ -491,20 +552,22 @@ git push --force origin main
 | 2 | Dockerfile | Step 1 | 1 file |
 | 3 | Pre-commit config | Step 1 | 1 file |
 | 4 | CI pipeline | Steps 1, 2 | 1 file |
-| 5 | Branch protection on `main` | Step 4 (first green run on GitHub) | — (GitHub settings) |
-| 6 | Git submodule for internal docs | — | .gitmodules + directory |
-| 7 | Dependabot config | Steps 2, 4 | 1 file |
-| 8 | PR template | — | 1 file |
-| 9 | README.md | All above | 1 file |
+| 5 | First GitHub run (GHCR) | Step 4 (act green locally) | — (GitHub settings + secrets) |
+| 6 | Branch protection on `main` | Step 5 (first green run on GitHub) | — (GitHub settings) |
+| 7 | Git submodule for internal docs | — | .gitmodules + directory |
+| 8 | Dependabot config | Steps 2, 4 | 1 file |
+| 9 | PR template | — | 1 file |
+| 10 | README.md | All above | 1 file |
 
 **After all files are created:**
 1. Run `uv sync` to generate `uv.lock`
 2. Run `pre-commit run --all-files` to verify all hooks pass
 3. Run `uv run pytest` to verify tests pass
 4. Run `act -j quality` to verify pipeline runs locally (requires act + Docker)
-5. Push to GitHub and verify pipeline runs green in Actions tab
-6. Configure branch protection on `main` (Step 5) — check names are now visible in the "Require status checks" dropdown because the first run has populated them
-7. Include link to green run in the delivery
+5. Configure GHCR secrets/variables and push to GitHub (Step 5)
+6. Verify pipeline runs green on PR, then merge and verify the `push` job on `main`
+7. Configure branch protection on `main` (Step 6) — check names are now visible in the "Require status checks" dropdown because the first run has populated them
+8. Include link to green run in the delivery
 
 ---
 
@@ -523,9 +586,12 @@ Before considering the template done:
 - [ ] POST to `/items` with JSON payload returns 201
 - [ ] `act -j quality` runs green locally
 - [ ] `act -j build` runs green locally (builds image, runs Trivy, runs smoke test)
-- [ ] Pipeline runs green on GitHub Actions (link in PR)
+- [ ] GHCR secrets (`REGISTRY_USERNAME`, `REGISTRY_TOKEN`) and variable (`REGISTRY_URL`) configured
+- [ ] Pipeline runs green on GitHub Actions — PR run (link in PR)
 - [ ] All jobs visible in Actions tab, no unexpected skips
-- [ ] Trivy SARIF appears in Security tab on GitHub
+- [ ] `push` job green on `main` after merge — image pushed to GHCR
+- [ ] Image visible at github.com → Packages (visibility set as needed)
+- [ ] SARIF uploads visible in Security → Code scanning: **Hadolint** and **Trivy** (both green, no alerts = clean scan)
 - [ ] Branch protection on `main` configured: PR required, ≥1 approval, CI checks required (`quality`, `dockerfile-security`, `build`), up-to-date-before-merge, no force push, no deletion, linear history
 - [ ] Direct push to `main` rejected (verified)
 - [ ] Force push to `main` rejected (verified)
