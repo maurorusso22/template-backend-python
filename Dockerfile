@@ -1,5 +1,5 @@
 # Stage 1: build dependencies (uv + build tools stay here, not in final image)
-FROM python:3.12.13-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286 AS builder
+FROM python:3.14.0-slim@sha256:0aecac02dc3d4c5dbb024b753af084cafe41f5416e02193f1ce345d671ec966e AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.6@sha256:b1e699368d24c57cda93c338a57a8c5a119009ba809305cc8e86986d4a006754 /uv /uvx /bin/
 
@@ -13,7 +13,7 @@ RUN uv sync --no-dev --no-install-project --frozen
 COPY src/ src/
 
 # Stage 2: runtime (no uv/build tools — smaller image, smaller attack surface)
-FROM python:3.12.13-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286 AS runtime
+FROM python:3.14.0-slim@sha256:0aecac02dc3d4c5dbb024b753af084cafe41f5416e02193f1ce345d671ec966e AS runtime
 
 # NOTE if there are remaining OS vulnerabilities:
 # `RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*`
