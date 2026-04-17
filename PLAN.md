@@ -468,9 +468,37 @@ git push --force origin main
 **What:** Add a git submodule pointing to a private repository for internal documentation.
 
 **Requirements:**
-- Submodule target: `git@github.com:maurorusso22/docs-internal.git` (placeholder — to be replaced with real URL)
+- Submodule target: `https://github.com/<org>/docs-internal.git`
 - Directory name: `docs-internal/`
 - Creates a `.gitmodules` file at root
+
+**Steps performed:**
+
+1. **Create the private repo on GitHub:**
+   ```bash
+   gh repo create <org>/docs-internal --private --description "Internal documentation (not client-facing)" --clone=false
+   ```
+
+2. **Initialize the repo with a README:**
+   ```bash
+   cd /tmp && git clone https://github.com/<org>/docs-internal.git && cd docs-internal
+   echo "# docs-internal\n\nInternal documentation." > README.md
+   git add README.md && git commit -m "docs: initial README" && git push origin main
+   cd /tmp && rm -rf docs-internal
+   ```
+
+3. **Add the submodule to the template repo:**
+   ```bash
+   cd <template-repo-root>
+   git submodule add https://github.com/<org>/docs-internal.git docs-internal
+   ```
+
+4. **Commit:**
+   ```bash
+   git commit -m "feat: add docs-internal git submodule for internal documentation"
+   ```
+
+**Result:** `.gitmodules` created at root, `docs-internal/` directory tracked as a submodule.
 
 **README must document:**
 - What the submodule is for (internal documentation, not visible to clients)
