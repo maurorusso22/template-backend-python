@@ -1,0 +1,13 @@
+# CODEOWNERS — auto-assign reviewers based on paths touched in a PR.
+# Requires branch protection rule "Require review from Code Owners" on main.
+#
+# Customize per project. Examples:
+#
+#   .github/           @org/devops
+#   Dockerfile         @org/devops
+#   helm-chart/        @org/devops
+#   src/               @org/backend
+#   tests/             @org/backend
+
+# Default: repo owner reviews everything
+*   @maurorusso22
