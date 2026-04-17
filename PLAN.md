@@ -17,6 +17,7 @@ template-backend-python/
 ├── .github/
 │   ├── workflows/
 │   │   └── ci.yml                     # CI pipeline (quality + docker + security + push)
+│   ├── CODEOWNERS                     # Auto-assign reviewers based on paths touched
 │   ├── dependabot.yml                 # Automated dependency updates (Docker + pip + GH Actions)
 │   └── pull_request_template.md       # PR template for standardized reviews
 ├── .pre-commit-config.yaml            # Pre-commit hooks (lint, format, types, secrets, commits)
@@ -522,15 +523,40 @@ git push --force origin main
 
 ---
 
-### Step 9: PR Template
+### Step 9: PR Template & CODEOWNERS
 
-**What:** Create `.github/pull_request_template.md`.
+**What:** Create `.github/pull_request_template.md` and `.github/CODEOWNERS`.
+
+#### PR Template (`.github/pull_request_template.md`)
 
 **Required sections:**
 - **What** — Brief description of the change
 - **Why** — The problem this solves or the motivation
 - **How to test** — Steps to verify locally or link to green CI run
 - **Checklist** — Tests added/updated, CI green, docs updated if relevant
+
+#### CODEOWNERS (`.github/CODEOWNERS`)
+
+**What:** Automatically assigns reviewers based on which paths a PR touches. On client repos this is essential — e.g., if someone touches `helm-chart/`, DevOps leads are auto-added as reviewers without needing to remember to tag them.
+
+**Template default:** A single catch-all rule assigning the repo owner as default reviewer. Downstream repos should customize with path-specific rules for their team structure.
+
+**Requires:** Branch protection rule "Require review from Code Owners" enabled on `main` (Step 6) for CODEOWNERS to be enforced, not just suggested.
+
+**Example path-based rules (for downstream customization):**
+```
+# Default: repo owner reviews everything
+*                       @org/team-leads
+
+# DevOps owns infra files
+.github/                @org/devops
+Dockerfile              @org/devops
+helm-chart/             @org/devops
+
+# Backend team owns application code
+src/                    @org/backend
+tests/                  @org/backend
+```
 
 ---
 
@@ -584,7 +610,7 @@ git push --force origin main
 | 6 | Branch protection on `main` | Step 5 (first green run on GitHub) | — (GitHub settings) |
 | 7 | Git submodule for internal docs | — | .gitmodules + directory |
 | 8 | Dependabot config | Steps 2, 4 | 1 file |
-| 9 | PR template | — | 1 file |
+| 9 | PR template & CODEOWNERS | — | 2 files |
 | 10 | README.md | All above | 1 file |
 
 **After all files are created:**
