@@ -29,7 +29,7 @@ on:
     outputs:
       image-ref:
         description: Fully-qualified pushed image reference (e.g. ghcr.io/org/foo:sha).
-        value: ${{ jobs.push.outputs.target-ref }}
+        value: ${{ jobs.push.outputs.target_ref }}
 
 jobs:
   push:
@@ -39,7 +39,7 @@ jobs:
       contents: read
       packages: write # needed when pushing to ghcr.io
     outputs:
-      target-ref: ${{ steps.push.outputs.target_ref }}
+      target_ref: ${{ steps.tag-push.outputs.target_ref }}
     steps:
       # Without this, a missing secret fails later with the cryptic
       # "Cannot perform an interactive login from a non TTY device".
@@ -74,7 +74,7 @@ jobs:
       # non-deterministic rollbacks, cache inconsistency across nodes, and
       # no traceability back to a specific commit.
       - name: Tag and push
-        id: push
+        id: tag-push
         env:
           SOURCE_REF: ${{ inputs.image-name }}:${{ github.sha }}
           TARGET_REF: ${{ inputs.registry-url != '' && format('{0}/{1}:{2}', inputs.registry-url, inputs.image-name, github.sha) || format('{0}:{1}', inputs.image-name, github.sha) }}
@@ -87,7 +87,7 @@ jobs:
       - name: Registry push summary
         if: success()
         env:
-          TARGET_REF: ${{ steps.push.outputs.target_ref }}
+          TARGET_REF: ${{ steps.tag-push.outputs.target_ref }}
         run: |
           {
             echo "### Registry push"
