@@ -26,7 +26,8 @@ A production-ready template for Python backend projects. Clone it, rename a few 
 | **FastAPI app** (`src/`) | Starter API with `/health`, `POST /items`, `GET /items/{id}`, Pydantic models, in-memory storage |
 | **Tests** (`tests/`) | Pytest suite with coverage enforcement (≥80%) using `TestClient` / `httpx` |
 | **Dockerfile** | Multi-stage build, digest-pinned base images, non-root user, `HEALTHCHECK`, no dev dependencies |
-| **CI pipeline** (`.github/workflows/ci.yml`) | 4-job GitHub Actions workflow — quality checks, Dockerfile security (Hadolint + Trivy), Docker build + image scan + smoke test, registry push |
+| **CI pipeline** (`.github/workflows/ci.yml`) | 5-job GitHub Actions workflow — quality checks, Dockerfile security (Hadolint + Trivy), Docker build + image scan + smoke test, registry push (delegated to a reusable workflow), and a notify consumer that reads the reusable's output |
+| **Reusable push workflow** (`.github/workflows/reusable-push.yml`) | Registry-agnostic push step extracted from `ci.yml` so other workflows can reuse it. Returns the fully-qualified pushed image reference as an output |
 | **Pre-commit hooks** (`.pre-commit-config.yaml`) | Ruff (lint + format), mypy, trailing whitespace, large file guard, secret scanning (gitleaks), conventional commits |
 | **Dependabot** (`.github/dependabot.yml`) | Automated weekly PRs for Docker base images, Python packages, and GitHub Actions versions |
 | **PR template** (`.github/pull_request_template.md`) | Standardized what/why/how-to-test/checklist for every PR |
@@ -140,7 +141,7 @@ The `push` job runs only on `main` (not on PRs), so it will not appear in the st
 
 The pipeline runs on every push to `main` and every PR against `main`. It is defined in `.github/workflows/ci.yml`.
 
-The four jobs run sequentially — each one depends on the previous passing:
+The pipeline is structured as 5 sequential jobs — each depends on the previous passing. Job 4 (`push`) is a **reusable workflow call**, not an inline job; see [Reusable workflows](#reusable-workflows) below.
 
 ![CI pipeline overview](docs/images/ci/gh_action.png)
 
@@ -181,18 +182,47 @@ Runs after `quality` and `dockerfile-security` both pass. Builds the Docker imag
 
 ![Docker build job steps](docs/images/ci/job_docker_build.png)
 
-### Job 4: `push` — Push to Registry
+### Job 4: `push` — Push to Registry (reusable workflow)
 
-Runs only on push to `main` (skipped on PRs). Loads the exact image that was scanned and smoke-tested — no rebuild.
+Runs only on push to `main` (skipped on PRs). Implemented as a `uses:` call into [`.github/workflows/reusable-push.yml`](.github/workflows/reusable-push.yml) — the calling job in `ci.yml` only declares `with:` / `secrets:` and the reusable workflow does the actual work:
 
 1. Verifies registry credentials are configured (hard-fails with a clear error if missing).
 2. Loads the image artifact from Job 3.
 3. Logs in to the configured registry.
 4. Tags with the commit SHA and pushes.
+5. Exports the fully-qualified pushed image reference as an `image_ref` output.
 
-Under `act`, the job starts but every step is skipped (registry push is a GitHub-only side effect).
+The pushed bytes are exactly what Job 3 scanned and smoke-tested — no rebuild. Under `act`, the workflow call is skipped (registry push is a GitHub-only side effect).
 
 ![Push job steps](docs/images/ci/job_push.png)
+
+### Job 5: `notify-pushed-image` — Consumer of the reusable's output
+
+Runs after `push` succeeds, only on `main`. It reads `needs.push.outputs.image_ref` and prints it. Today it just echoes the reference, but it is the natural extension point for downstream automation: Slack/Teams notifications, Helm upgrade triggers, ArgoCD syncs, etc. It also closes the loop on the reusable workflow contract — the reusable produces a value, and a downstream job consumes it.
+
+![Reusable push + notify-pushed-image consumer](docs/images/ci/reusable_push.png)
+
+### Reusable workflows
+
+A **reusable workflow** is a workflow that can be called from another workflow via `uses: ./path/to/file.yml`, similar to a function call. It accepts `inputs` and `secrets`, and returns `outputs` that callers read via `needs.<job>.outputs.<name>`.
+
+This template extracts the registry push into `reusable-push.yml` for two reasons:
+
+- **Reusability across workflows.** Any future workflow in this repo (e.g. a manual `workflow_dispatch` to push from a tag, a scheduled rebuild) can push to the registry by calling the same file — no copy-paste of login + tag + push steps.
+- **Demonstrating the input/output contract.** The reusable declares the registry inputs it needs and exports the pushed `image_ref`. The `notify-pushed-image` job in `ci.yml` shows how a downstream consumer reads that output. Replace the echo with a real notification when you wire one up.
+
+**Inputs / outputs at a glance:**
+
+| Direction | Name | Type | Notes |
+| --------- | ---- | ---- | ----- |
+| Input | `image-name` | string | Local source tag and target image name |
+| Input | `artifact-name` | string | Default `docker-image` — name of the artifact produced upstream |
+| Input | `registry-url` | string | Hostname (e.g. `ghcr.io`); empty defaults to Docker Hub |
+| Input | `registry-username` | string | **Non-secret** input on purpose (see below) |
+| Secret | `REGISTRY_TOKEN` | secret | The actual credential |
+| Output | `image_ref` | string | Fully-qualified pushed reference (e.g. `ghcr.io/org/foo:<sha>`) |
+
+> **Why the username is an input, not a secret:** GitHub Actions auto-masks any string in logs that matches a registered secret value, *and* refuses to emit job/workflow outputs that contain those strings ("Skip output … since it may contain secret"). When the registry username (e.g. `myuser`) appears as a substring of the pushed reference (`ghcr.io/myuser/foo:<sha>`), storing it as a secret causes GHA to suppress the `image_ref` output. The token stays a secret; the username — which is public information for ghcr.io / Docker Hub anyway — is passed as a non-secret input via `vars.REGISTRY_USERNAME`.
 
 ### What runs where
 
@@ -211,9 +241,11 @@ The pipeline is registry-agnostic. It uses three configurable values:
 
 | Type | Name | Where to set |
 | ---- | ---- | ------------ |
-| Secret | `REGISTRY_USERNAME` | Repo → Settings → Secrets → Actions |
+| Variable | `REGISTRY_USERNAME` | Repo → Settings → Variables → Actions |
 | Secret | `REGISTRY_TOKEN` | Repo → Settings → Secrets → Actions |
 | Variable | `REGISTRY_URL` | Repo → Settings → Variables → Actions |
+
+> The username is a **variable**, not a secret. See [Reusable workflows](#reusable-workflows) for the reason — short version: storing the username as a secret causes GitHub to suppress the pushed image reference output.
 
 Images are tagged with the commit SHA only. `latest` is intentionally avoided — it causes non-deterministic rollbacks, cache inconsistency across nodes, and no traceability to a specific commit.
 
@@ -388,6 +420,66 @@ ci: bump trivy action to v0.69.3
 ```
 
 A commit with a non-conforming message (e.g., `add new feature`) will be rejected by the `commit-msg` hook.
+
+## Troubleshooting
+
+### Trivy image scan fails on CI
+
+When the `build` job's "Trivy image scan" step exits with code 1, Trivy found at least one CRITICAL/HIGH CVE that has a known fix and is not listed in `.trivyignore`. The CVE list goes to the SARIF file (uploaded to **Security → Code scanning**), so it doesn't appear in the GitHub Actions log.
+
+**Reproduce locally (table output, same gates as CI):**
+
+```bash
+docker build -t template-backend-python:scan .
+trivy image \
+  --severity CRITICAL,HIGH \
+  --ignore-unfixed \
+  --ignorefile .trivyignore \
+  template-backend-python:scan
+```
+
+The table shows CVE ID, package, installed version, fixed version, and severity — that's everything you need to decide what to do.
+
+**Decide what to do, in this order:**
+
+1. **Bump the base image digest** in `Dockerfile`. If a new `python:3.12.x-slim` digest contains the patched package, this is the right fix. Dependabot opens these PRs automatically; you can also bump manually.
+2. **Bump the affected Python dependency** in `pyproject.toml` (and run `uv sync` to update `uv.lock`). Use this when the CVE is in a Python package, not the base OS.
+3. **Add the CVE to `.trivyignore`** — last resort, only when 1 and 2 are unavailable (e.g. fix exists upstream but the base image hasn't been rebuilt yet).
+
+**Updating `.trivyignore`:**
+
+Each entry must carry a CVE ID, a justification comment, and an `exp:YYYY-MM-DD` directive. The expiration date forces re-evaluation: after that date, Trivy resumes flagging the CVE and CI fails again, so the suppression doesn't become permanent.
+
+```
+# CVE-2026-31789 (CRITICAL) — OpenSSL heap buffer overflow on 32-bit systems.
+# Fixed upstream in Debian trixie as 3.5.5-1~deb13u2, but python:3.12.x-slim
+# has not yet been rebuilt against the patched Debian point release.
+# Action: remove this entry once Dependabot opens a base image bump PR.
+CVE-2026-31789 exp:2026-06-05
+```
+
+After editing, re-run the local scan above to confirm `Total: 0`. The line `Some vulnerabilities have been ignored/suppressed` confirms your suppressions took effect; add `--show-suppressed` to see exactly which ones.
+
+### `notify-pushed-image` prints an empty image reference
+
+**Symptom:** the `Notify pushed image` job succeeds but logs `Pushed image →` with nothing after the arrow. Job-level annotations show:
+
+```
+Push to Registry / Push to Registry
+Skip output 'image_ref' since it may contain secret.
+```
+
+**Root cause:** GitHub Actions auto-masks any string in workflow logs that matches a registered secret value, *and* refuses to emit job/workflow outputs that contain those masked strings. If the registry username is stored as a secret (e.g. `secrets.REGISTRY_USERNAME = myuser`) and the pushed reference includes it (`ghcr.io/myuser/foo:<sha>`), GHA suppresses the entire `image_ref` output — the consumer reads an empty string, no error.
+
+**Fix:** pass the username as a non-secret input, not as a secret. The token stays secret; usernames for ghcr.io / Docker Hub are public information anyway.
+
+1. In GitHub: **Settings → Secrets and variables → Actions → Variables** tab → add `REGISTRY_USERNAME` with your value. Delete the old secret with the same name (or just stop referencing it).
+2. In `ci.yml`, the `push` job passes `registry-username: ${{ vars.REGISTRY_USERNAME }}` via `with:` and only `REGISTRY_TOKEN` via `secrets:`.
+3. In `reusable-push.yml`, `registry-username` is declared as a required `inputs:` entry, not under `secrets:`.
+
+This template already wires it that way; the steps above are the recipe to apply if you adapt the reusable workflow into another project and hit the same masking.
+
+**Generalisation:** any time GHA suppresses an output, look for a secret value that overlaps with the output string. Fix is always the same — make the overlapping value a non-secret if it's not actually sensitive, or strip it from the output if it is.
 
 ## Design decisions
 
