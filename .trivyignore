@@ -25,3 +25,15 @@
 # Action: remove this entry once Dependabot opens a base image bump PR
 # against the new digest. The `exp:` date forces re-evaluation.
 CVE-2026-28390 exp:2026-05-31
+
+# CVE-2026-31789 (CRITICAL), CVE-2026-28387 / CVE-2026-28388 / CVE-2026-28389
+# (HIGH) — OpenSSL CVEs disclosed in the same advisory window, affecting the
+# same Debian packages (libssl3t64, openssl, openssl-provider-legacy). Fixed
+# upstream in Debian trixie as 3.5.5-1~deb13u2; same root cause as the
+# CVE-2026-28390 entry above — python:3.12.x-slim has not yet been rebuilt
+# against the patched Debian point release.
+# Action: remove these entries once Dependabot opens a base image bump PR.
+CVE-2026-31789 exp:2026-06-05
+CVE-2026-28387 exp:2026-06-05
+CVE-2026-28388 exp:2026-06-05
+CVE-2026-28389 exp:2026-06-05
