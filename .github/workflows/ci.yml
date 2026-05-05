@@ -328,83 +328,25 @@ jobs:
   # ----------------------------------------------------------------------------
   push:
     name: Push to Registry
-    runs-on: ubuntu-latest
     needs: build
-    # Only run on main. `env.ACT` is NOT valid in a job-level `if` (act's
-    # schema rejects it outright, and GitHub's docs restrict job-level `if`
-    # to github/needs/vars/inputs). The !env.ACT guard lives on each step
-    # below, so under act the job starts but every step is skipped.
     if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write  # needed when pushing to ghcr.io
+    uses: ./.github/workflows/reusable-push.yml
+    with:
+      image-name: template-backend-python
+      registry-url: ${{ vars.REGISTRY_URL }}
+    secrets:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+
+  # Consumer of the reusable output. Today it only prints, but it is the natural
+  # hook for future extensions: Slack/Teams notify, deploy Helm, etc.
+  # And it is the piece that closes the educational loop: reusable produces
+  # a value → someone reads it.
+  notify-pushed-image:
+    name: Notify pushed image
+    needs: push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     steps:
-      # No checkout or Buildx needed — this job pushes the exact bytes that
-      # the build job smoke-tested and scanned, loaded from the artifact.
-
-      # Without this, a missing secret fails later with a confusing
-      # "Cannot perform an interactive login from a non TTY device" error.
-      - name: Verify registry credentials are configured
-        if: ${{ !env.ACT }}
-        run: |
-          echo "REGISTRY_USERNAME configured: ${{ secrets.REGISTRY_USERNAME != '' }}"
-          echo "REGISTRY_TOKEN configured:    ${{ secrets.REGISTRY_TOKEN != '' }}"
-          echo "REGISTRY_URL (variable):      ${{ vars.REGISTRY_URL || '(empty → Docker Hub default)' }}"
-          if [ -z "${{ secrets.REGISTRY_USERNAME }}" ] || [ -z "${{ secrets.REGISTRY_TOKEN }}" ]; then
-            echo "::error::Registry credentials are missing. Configure REGISTRY_USERNAME and REGISTRY_TOKEN repository secrets."
-            exit 1
-          fi
-
-      - name: Download Docker image artifact
-        if: ${{ !env.ACT }}
-        uses: actions/download-artifact@v8
-        with:
-          name: docker-image
-          path: /tmp
-
-      - name: Load Docker image
-        if: ${{ !env.ACT }}
-        run: docker load -i /tmp/image.tar
-
-      # Empty registry input → docker/login-action defaults to Docker Hub.
-      - name: Log in to registry
-        if: ${{ !env.ACT }}
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ vars.REGISTRY_URL }}
-          username: ${{ secrets.REGISTRY_USERNAME }}
-          password: ${{ secrets.REGISTRY_TOKEN }}
-
-      # Tag with commit SHA only. `latest` is avoided by design:
-      # non-deterministic rollbacks, cache inconsistency across nodes, and
-      # no traceability back to a specific commit.
-      - name: Tag and push
-        id: push
-        if: ${{ !env.ACT }}
-        env:
-          SOURCE_REF: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
-          TARGET_REF: ${{ vars.REGISTRY_URL != '' && format('{0}/{1}:{2}', vars.REGISTRY_URL, env.DOCKER_IMAGE_NAME, github.sha) || format('{0}:{1}', env.DOCKER_IMAGE_NAME, github.sha) }}
-        run: |
-          set -e
-          docker tag "$SOURCE_REF" "$TARGET_REF"
-          docker push "$TARGET_REF"
-          echo "target_ref=$TARGET_REF" >> "$GITHUB_OUTPUT"
-
-      # Success-only: if the push step failed, that step already failed the
-      # job with the real error — a trailing "possible causes" narrative here
-      # would only obscure it.
-      - name: Registry push summary
-        if: ${{ success() && !env.ACT }}
-        env:
-          TARGET_REF: ${{ steps.push.outputs.target_ref }}
-        run: |
-          {
-            echo "### Registry push"
-            echo ""
-            echo "| Field    | Value |"
-            echo "| -------- | ----- |"
-            echo "| Image    | \`$TARGET_REF\` |"
-            echo "| Commit   | \`${{ github.sha }}\` |"
-            echo "| Registry | \`${{ vars.REGISTRY_URL || 'docker.io (default)' }}\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "Pushed $TARGET_REF"
+      - name: Print pushed image reference
+        run: echo "Pushed image → ${{ needs.push.outputs.image-ref }}"
