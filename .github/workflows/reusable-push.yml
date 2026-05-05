@@ -1,0 +1,101 @@
+name: Reusable - Push image to registry
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: >-
+          Image name used for both the local source tag and the target tag.
+          Example: "template-backend-python".
+        required: true
+        type: string
+      artifact-name:
+        description: Name of the artifact produced by the upstream build job.
+        required: false
+        default: docker-image
+        type: string
+      registry-url:
+        description: >-
+          Registry hostname (e.g. "ghcr.io", "myorg.azurecr.io").
+          Leave empty to default to Docker Hub.
+        required: false
+        default: ""
+        type: string
+    secrets:
+      REGISTRY_USERNAME:
+        required: true
+      REGISTRY_TOKEN:
+        required: true
+    outputs:
+      image-ref:
+        description: Fully-qualified pushed image reference (e.g. ghcr.io/org/foo:sha).
+        value: ${{ jobs.push.outputs.target-ref }}
+
+jobs:
+  push:
+    name: Push to Registry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # needed when pushing to ghcr.io
+    outputs:
+      target-ref: ${{ steps.push.outputs.target_ref }}
+    steps:
+      # Without this, a missing secret fails later with the cryptic
+      # "Cannot perform an interactive login from a non TTY device".
+      - name: Verify registry credentials are configured
+        run: |
+          echo "REGISTRY_USERNAME configured: ${{ secrets.REGISTRY_USERNAME != '' }}"
+          echo "REGISTRY_TOKEN    configured: ${{ secrets.REGISTRY_TOKEN != '' }}"
+          echo "registry-url      (input):    ${{ inputs.registry-url || '(empty → Docker Hub default)' }}"
+          if [ -z "${{ secrets.REGISTRY_USERNAME }}" ] || [ -z "${{ secrets.REGISTRY_TOKEN }}" ]; then
+            echo "::error::Registry credentials are missing. Configure REGISTRY_USERNAME and REGISTRY_TOKEN repository secrets."
+            exit 1
+          fi
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: /tmp
+
+      - name: Load Docker image
+        run: docker load -i /tmp/image.tar
+
+      # Empty registry input → docker/login-action defaults to Docker Hub.
+      - name: Log in to registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.registry-url }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      # Tag with commit SHA only. `latest` is avoided by design:
+      # non-deterministic rollbacks, cache inconsistency across nodes, and
+      # no traceability back to a specific commit.
+      - name: Tag and push
+        id: push
+        env:
+          SOURCE_REF: ${{ inputs.image-name }}:${{ github.sha }}
+          TARGET_REF: ${{ inputs.registry-url != '' && format('{0}/{1}:{2}', inputs.registry-url, inputs.image-name, github.sha) || format('{0}:{1}', inputs.image-name, github.sha) }}
+        run: |
+          set -e
+          docker tag "$SOURCE_REF" "$TARGET_REF"
+          docker push "$TARGET_REF"
+          echo "target_ref=$TARGET_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Registry push summary
+        if: success()
+        env:
+          TARGET_REF: ${{ steps.push.outputs.target_ref }}
+        run: |
+          {
+            echo "### Registry push"
+            echo ""
+            echo "| Field    | Value |"
+            echo "| -------- | ----- |"
+            echo "| Image    | \`$TARGET_REF\` |"
+            echo "| Commit   | \`${{ github.sha }}\` |"
+            echo "| Registry | \`${{ inputs.registry-url || 'docker.io (default)' }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed $TARGET_REF"
