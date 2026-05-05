@@ -352,4 +352,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Print pushed image reference
-        run: echo "Pushed image → ${{ needs.push.outputs.image-ref }}"
+        run: echo "Pushed image → ${{ needs.push.outputs.imageref }}"
