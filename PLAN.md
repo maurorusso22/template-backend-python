@@ -259,25 +259,26 @@ git reset HEAD~1
 **Workflow-level configuration:**
 - **Triggers:** push to `main`, pull requests against `main`.
 - **Environment variables** (change per project):
-  - `PYTHON_VERSION` — Python version to install
   - `APP_NAME` — Application name
   - `DOCKER_IMAGE_NAME` — Docker image name
+- **Python version matrix:** the `quality` job runs against every entry in `strategy.matrix.python-version` (currently `["3.12", "3.13"]`); change the list here to add/remove versions.
 - **Permissions:** least-privilege default `contents: read` at workflow level; jobs override per-need (e.g., `security-events: write` for SARIF upload, `packages: write` for ghcr.io push).
 
 **Pipeline structure — 4 jobs:**
 
 #### Job 1: `quality` (Code Quality & Testing)
 - **Runs:** Always (push to main, PRs)
+- **Strategy:** matrix over `python-version: ["3.12", "3.13"]` with `fail-fast: false` — every check runs against each version so a single-version regression does not mask the full picture.
 - **Steps:**
   1. Checkout code (`actions/checkout@v4`)
   2. Install uv (`astral-sh/setup-uv@v3`)
-  3. Set up Python — `uv python install ${{ env.PYTHON_VERSION }}`
+  3. Set up Python — `uv python install ${{ matrix.python-version }}`
   4. Install dependencies — `uv sync --all-extras` (id: `install`)
   5. Format check — `uv run ruff format --check .` (id: `format-check`)
   6. Lint + import sorting — `uv run ruff check .` (id: `lint`)
   7. Type check — `uv run mypy src/` (id: `typecheck`)
   8. Tests with coverage — `uv run pytest --cov=src --cov-report=xml --cov-report=term --cov-fail-under=80` (id: `tests`)
-  9. Upload coverage artifact — **only on GitHub** (`if: always() && !env.ACT`), `if-no-files-found: ignore`
+  9. Upload coverage artifact — **only on GitHub** (`if: always() && !env.ACT`), `if-no-files-found: ignore`. Name suffixed with `-py${{ matrix.python-version }}` so matrix entries do not collide on upload.
 
 **Fail-fast cascade:** Each step after install has `if: steps.<previous>.outcome == 'success'`. This stops the pipeline at the first failure instead of running every check and producing noisy output.
 

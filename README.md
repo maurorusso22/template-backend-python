@@ -128,7 +128,7 @@ The `push` job runs only on `main` (not on PRs), so it will not appear in the st
 
 **Change Python version:** Update in three places:
 1. `pyproject.toml` — `requires-python`
-2. `.github/workflows/ci.yml` — `PYTHON_VERSION` env var
+2. `.github/workflows/ci.yml` — `strategy.matrix.python-version` in the `quality` job (the CI tests against every entry; add/remove versions here)
 3. `Dockerfile` — both `FROM python:` lines (update the tag and digest)
 
 **Adjust coverage threshold:** Change `--cov-fail-under=80` in `ci.yml` (step `tests`) and in your local test commands.
