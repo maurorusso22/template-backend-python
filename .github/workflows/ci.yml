@@ -330,6 +330,9 @@ jobs:
     name: Push to Registry
     needs: build
     if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write # forwarded to the reusable workflow (ghcr.io push)
     uses: ./.github/workflows/reusable-push.yml
     with:
       image-name: template-backend-python
