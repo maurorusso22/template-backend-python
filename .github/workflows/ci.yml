@@ -337,8 +337,8 @@ jobs:
     with:
       image-name: template-backend-python
       registry-url: ${{ vars.REGISTRY_URL }}
+      registry-username: ${{ vars.REGISTRY_USERNAME }}
     secrets:
-      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
       REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
 
   # Consumer of the reusable output. Today it only prints, but it is the natural
@@ -352,4 +352,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Print pushed image reference
-        run: echo "Pushed image → ${{ needs.push.outputs.imageref }}"
+        run: echo "Pushed image → ${{ needs.push.outputs.image_ref }}"
