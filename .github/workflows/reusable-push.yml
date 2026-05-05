@@ -27,9 +27,9 @@ on:
       REGISTRY_TOKEN:
         required: true
     outputs:
-      image-ref:
+      imageref:
         description: Fully-qualified pushed image reference (e.g. ghcr.io/org/foo:sha).
-        value: ${{ jobs.push.outputs.target_ref }}
+        value: ${{ jobs.push.outputs.targetref }}
 
 jobs:
   push:
@@ -39,7 +39,7 @@ jobs:
       contents: read
       packages: write # needed when pushing to ghcr.io
     outputs:
-      target_ref: ${{ steps.tag-push.outputs.target_ref }}
+      targetref: ${{ steps.tag-push.outputs.targetref }}
     steps:
       # Without this, a missing secret fails later with the cryptic
       # "Cannot perform an interactive login from a non TTY device".
@@ -82,12 +82,12 @@ jobs:
           set -e
           docker tag "$SOURCE_REF" "$TARGET_REF"
           docker push "$TARGET_REF"
-          echo "target_ref=$TARGET_REF" >> "$GITHUB_OUTPUT"
+          echo "targetref=$TARGET_REF" >> "$GITHUB_OUTPUT"
 
       - name: Registry push summary
         if: success()
         env:
-          TARGET_REF: ${{ steps.tag-push.outputs.target_ref }}
+          TARGET_REF: ${{ steps.tag-push.outputs.targetref }}
         run: |
           {
             echo "### Registry push"
