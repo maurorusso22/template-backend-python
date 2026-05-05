@@ -160,6 +160,14 @@ Runs format check, linting, type checking, and tests in a **fail-fast cascade** 
 
 ![Quality job steps](docs/images/ci/job_quality.png)
 
+#### Python version matrix
+
+The job runs as a **strategy matrix** over `python-version: ["3.12", "3.13"]` with `fail-fast: false`, so every check (format, lint, type check, tests) executes against each supported interpreter and a regression on one version doesn't mask the others. Add or remove versions by editing `strategy.matrix.python-version` in `.github/workflows/ci.yml`.
+
+The coverage artifact is uploaded with a per-version suffix (`coverage-report-py3.12`, `coverage-report-py3.13`) — without that suffix, parallel matrix runs would collide on a single artifact name and only the first uploader would succeed.
+
+![Quality job matrix runs](docs/images/ci/quality_matrix.png)
+
 ### Job 2: `dockerfile-security` — Dockerfile Static Analysis
 
 Runs after `quality` passes. Scans the Dockerfile and repo configs without touching the Docker daemon.
